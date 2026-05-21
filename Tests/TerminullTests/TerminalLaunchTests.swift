@@ -32,7 +32,7 @@ final class TerminalLaunchTests: XCTestCase {
     }
 
     func testReleaseMetadataIncludesVersionAboutCopyAndDonationAddresses() {
-        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1")
+        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.1")
         XCTAssertTrue(TerminullReleaseMetadata.aboutText.contains("Terminull was built by synfinner. No tracking, no bs, just a terminal emulator with SSH management."))
         XCTAssertTrue(TerminullReleaseMetadata.donationText.contains("Donations are accepted via Bitcoin and Bitcoin Lightning."))
         XCTAssertEqual(TerminullReleaseMetadata.bitcoinAddress, "bc1qqfrapakl4yceqs99k84j3tznjsa9c59mklvsvm")
@@ -147,6 +147,33 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertEqual(SSHAgentService.addIdentityArguments(keyPath: keyPath), ["-q", "--", keyPath])
         XCTAssertEqual(SSHAgentService.removeIdentityArguments(keyPath: keyPath), ["-q", "-d", "--", keyPath])
+    }
+
+    func testSSHAgentSocketPathUsesShortRuntimeLocation() {
+        let socketURL = SSHAgentService.agentSocketURL(
+            runtimeRoot: URL(fileURLWithPath: "/var/folders/v7/f56440p13y75ndcywg8300sh0000gn/T", isDirectory: true),
+            id: UUID(uuidString: "37D02F08-F234-4FF9-AA71-B07287079B99")!
+        )
+
+        XCTAssertLessThanOrEqual(socketURL.path.utf8.count, SSHAgentService.maximumUnixSocketPathLength)
+        XCTAssertFalse(socketURL.path.contains("Application Support"))
+        XCTAssertEqual(socketURL.lastPathComponent, "a-37d02f08.sock")
+    }
+
+    func testSSHAgentSocketPathFallsBackWhenRuntimePathIsTooLong() {
+        let longRuntimeRoot = URL(
+            fileURLWithPath: "/tmp/" + String(repeating: "nested-runtime-path/", count: 8),
+            isDirectory: true
+        )
+
+        let socketURL = SSHAgentService.agentSocketURL(
+            runtimeRoot: longRuntimeRoot,
+            id: UUID(uuidString: "37D02F08-F234-4FF9-AA71-B07287079B99")!
+        )
+
+        XCTAssertLessThanOrEqual(socketURL.path.utf8.count, SSHAgentService.maximumUnixSocketPathLength)
+        XCTAssertTrue(socketURL.path.hasPrefix("/tmp/tnl-"))
+        XCTAssertEqual(socketURL.lastPathComponent, "a-37d02f08.sock")
     }
 
     func testShellResolverUsesApprovedLoginShell() {

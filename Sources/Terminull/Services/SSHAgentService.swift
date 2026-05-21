@@ -13,7 +13,10 @@ protocol SSHAgentManaging: AnyObject {
 }
 
 final class SSHAgentService: SSHAgentManaging {
+    static let maximumUnixSocketPathLength = 100
+
     private static let processTimeoutSeconds: TimeInterval = 10
+    private static let socketTokenLength = 8
 
     private let keychain = KeychainService()
     private let agentLock = NSLock()
@@ -22,6 +25,8 @@ final class SSHAgentService: SSHAgentManaging {
     init() {
         Self.removeStaleAskPassScripts()
         Self.removeStaleAgentSockets()
+        Self.removeStaleAgentSockets(directory: Self.fallbackAgentSocketDirectory)
+        Self.removeStaleAgentSockets(directory: Self.legacyAgentSocketDirectory)
     }
 
     deinit {
@@ -78,6 +83,8 @@ final class SSHAgentService: SSHAgentManaging {
         stopAgent()
         Self.removeStaleAskPassScripts()
         Self.removeStaleAgentSockets()
+        Self.removeStaleAgentSockets(directory: Self.fallbackAgentSocketDirectory)
+        Self.removeStaleAgentSockets(directory: Self.legacyAgentSocketDirectory)
     }
 
     private func addIdentityToAgent(keyPath: String, account: String, agent: SSHAgent) throws {
@@ -114,9 +121,12 @@ final class SSHAgentService: SSHAgentManaging {
             return agent
         }
 
-        let directory = SupportPaths.applicationSupportDirectory.appendingPathComponent("ssh-agent", isDirectory: true)
+        let socketURL = Self.agentSocketURL()
+        let directory = socketURL.deletingLastPathComponent()
         try FileManager.default.createPrivateDirectory(at: directory)
-        let socketURL = directory.appendingPathComponent("agent-\(UUID().uuidString).sock")
+        guard socketURL.path.utf8.count <= Self.maximumUnixSocketPathLength else {
+            throw SSHAgentError(message: "ssh-agent socket path is too long")
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-agent")
@@ -234,6 +244,30 @@ final class SSHAgentService: SSHAgentManaging {
         ["-q", "-d", "--", keyPath]
     }
 
+    static func agentSocketDirectory(runtimeRoot: URL = FileManager.default.temporaryDirectory) -> URL {
+        runtimeRoot.appendingPathComponent("tnl-\(getuid())", isDirectory: true)
+    }
+
+    static func agentSocketURL(
+        runtimeRoot: URL = FileManager.default.temporaryDirectory,
+        id: UUID = UUID()
+    ) -> URL {
+        let token = id.uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+            .prefix(socketTokenLength)
+        let fileName = "a-\(token).sock"
+        let candidate = agentSocketDirectory(runtimeRoot: runtimeRoot)
+            .appendingPathComponent(fileName, isDirectory: false)
+
+        guard candidate.path.utf8.count > maximumUnixSocketPathLength else {
+            return candidate
+        }
+
+        return fallbackAgentSocketDirectory
+            .appendingPathComponent(fileName, isDirectory: false)
+    }
+
     static func removeStaleAskPassScripts(
         directory: URL = SupportPaths.applicationSupportDirectory.appendingPathComponent("askpass", isDirectory: true)
     ) {
@@ -241,9 +275,18 @@ final class SSHAgentService: SSHAgentManaging {
     }
 
     static func removeStaleAgentSockets(
-        directory: URL = SupportPaths.applicationSupportDirectory.appendingPathComponent("ssh-agent", isDirectory: true)
+        directory: URL = agentSocketDirectory()
     ) {
         removeFiles(in: directory) { $0.lastPathComponent.hasPrefix("agent-") && $0.pathExtension == "sock" }
+        removeFiles(in: directory) { $0.lastPathComponent.hasPrefix("a-") && $0.pathExtension == "sock" }
+    }
+
+    private static var legacyAgentSocketDirectory: URL {
+        SupportPaths.applicationSupportDirectory.appendingPathComponent("ssh-agent", isDirectory: true)
+    }
+
+    private static var fallbackAgentSocketDirectory: URL {
+        agentSocketDirectory(runtimeRoot: URL(fileURLWithPath: "/tmp", isDirectory: true))
     }
 
     private static func removeFiles(in directory: URL, matching predicate: (URL) -> Bool) {

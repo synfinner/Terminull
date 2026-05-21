@@ -1,0 +1,30 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SwiftPM and build output
+.build/
+.swiftpm/
+dist/
+DerivedData/
+*.xcresult
+*.dSYM/
+
+# Xcode and editor user state
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local environment and agent metadata
+.codex/
+.env
+.env.*
+
+# Logs and temporary files
+*.log
+tmp/

@@ -32,7 +32,7 @@ final class TerminalLaunchTests: XCTestCase {
     }
 
     func testReleaseMetadataIncludesVersionAboutCopyAndDonationAddresses() {
-        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.3")
+        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.3b")
         XCTAssertTrue(TerminullReleaseMetadata.aboutText.contains("Terminull was built by synfinner. No tracking, no bs, just a terminal emulator with SSH management."))
         XCTAssertTrue(TerminullReleaseMetadata.donationText.contains("Donations are accepted via Bitcoin and Bitcoin Lightning."))
         XCTAssertEqual(TerminullReleaseMetadata.bitcoinAddress, "bc1qqfrapakl4yceqs99k84j3tznjsa9c59mklvsvm")
@@ -658,6 +658,29 @@ final class TerminalLaunchTests: XCTestCase {
         )
         XCTAssertFalse(remove.storesLoginPassword)
         XCTAssertEqual(remove.keychainUpdate, .deleteSecret)
+    }
+
+    func testKeychainServiceFallsBackWhenDataProtectionEntitlementIsUnavailable() {
+        XCTAssertTrue(KeychainService.shouldFallBackToLoginKeychain(status: errSecMissingEntitlement))
+        XCTAssertFalse(KeychainService.shouldFallBackToLoginKeychain(status: errSecAuthFailed))
+    }
+
+    func testKeychainServiceSavesReadsAndDeletesInCurrentSigningContext() throws {
+        let account = "terminull-test-\(UUID().uuidString)"
+        let keychain = KeychainService()
+
+        try keychain.deleteSecret(account: account)
+        defer {
+            try? keychain.deleteSecret(account: account)
+        }
+
+        try keychain.saveSecret("temporary-secret", account: account)
+        XCTAssertEqual(try keychain.readSecret(account: account), "temporary-secret")
+        XCTAssertTrue(keychain.hasSecret(account: account))
+
+        try keychain.deleteSecret(account: account)
+        XCTAssertNil(try keychain.readSecret(account: account))
+        XCTAssertFalse(keychain.hasSecret(account: account))
     }
 
     func testStaleAskPassScriptsAreRemoved() throws {

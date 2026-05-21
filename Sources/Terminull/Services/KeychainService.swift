@@ -12,8 +12,21 @@ final class KeychainService: KeychainManaging {
     static let serviceName = "com.synfinner.Terminull.ssh-key-passphrase"
 
     func saveSecret(_ secret: String, account: String) throws {
+        do {
+            try saveSecret(secret, account: account, usesDataProtectionKeychain: true)
+            try? deleteSecret(account: account, usesDataProtectionKeychain: false)
+        } catch let error as KeychainError where Self.shouldFallBackToLoginKeychain(status: error.status) {
+            try saveSecret(secret, account: account, usesDataProtectionKeychain: false)
+        }
+    }
+
+    private func saveSecret(
+        _ secret: String,
+        account: String,
+        usesDataProtectionKeychain: Bool
+    ) throws {
         let data = Data(secret.utf8)
-        let query = Self.query(account: account, usesDataProtectionKeychain: true)
+        let query = Self.query(account: account, usesDataProtectionKeychain: usesDataProtectionKeychain)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
@@ -32,7 +45,6 @@ final class KeychainService: KeychainManaging {
             guard addStatus == errSecSuccess else {
                 throw KeychainError(status: addStatus)
             }
-            try? deleteSecret(account: account, usesDataProtectionKeychain: false)
             return
         }
 
@@ -44,8 +56,8 @@ final class KeychainService: KeychainManaging {
             if let secret = try readSecret(account: account, usesDataProtectionKeychain: true) {
                 return secret
             }
-        } catch let error as KeychainError where error.status == errSecItemNotFound {
-            return try readSecret(account: account, usesDataProtectionKeychain: false)
+        } catch let error as KeychainError where Self.shouldFallBackToLoginKeychain(status: error.status) {
+            // Ad-hoc and non-entitled builds cannot access the macOS data-protection keychain.
         }
         return try readSecret(account: account, usesDataProtectionKeychain: false)
     }
@@ -55,8 +67,16 @@ final class KeychainService: KeychainManaging {
     }
 
     func deleteSecret(account: String) throws {
-        try deleteSecret(account: account, usesDataProtectionKeychain: true)
+        do {
+            try deleteSecret(account: account, usesDataProtectionKeychain: true)
+        } catch let error as KeychainError where Self.shouldFallBackToLoginKeychain(status: error.status) {
+            // Still remove the fallback login-keychain item when data-protection access is unavailable.
+        }
         try deleteSecret(account: account, usesDataProtectionKeychain: false)
+    }
+
+    static func shouldFallBackToLoginKeychain(status: OSStatus) -> Bool {
+        status == errSecMissingEntitlement
     }
 
     private static func query(account: String, usesDataProtectionKeychain: Bool) -> [String: Any] {

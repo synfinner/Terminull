@@ -3,7 +3,9 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="Terminull"
-APP_VERSION="0.1.3"
+APP_VERSION="0.1.3b"
+BUNDLE_SHORT_VERSION="0.1.3"
+BUNDLE_BUILD_VERSION="0.1.3b1"
 BUNDLE_ID="com.synfinner.Terminull"
 MIN_SYSTEM_VERSION="14.0"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
@@ -72,9 +74,9 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleIconFile</key>
   <string>$APP_NAME</string>
   <key>CFBundleShortVersionString</key>
-  <string>$APP_VERSION</string>
+  <string>$BUNDLE_SHORT_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>$APP_VERSION</string>
+  <string>$BUNDLE_BUILD_VERSION</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

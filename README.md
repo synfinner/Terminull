@@ -2,7 +2,7 @@
 
 ![Terminull release preview](Assets/Release/release.png)
 
-Terminull 0.1.3 is a minimal native macOS terminal emulator with saved SSH profiles, tabbed sessions, and Keychain-backed SSH key passphrase storage.
+Terminull 0.1.3b is a minimal native macOS terminal emulator with saved SSH profiles, tabbed sessions, and Keychain-backed SSH key passphrase storage.
 
 Terminull is an early preview release. It may contain bugs, incomplete behavior, or rough edges. Use it with care, especially when working in important local shells or remote SSH sessions.
 
@@ -63,12 +63,12 @@ synfinner@cake.cash
 
 ## Release Build Notes
 
-The local build script creates `dist/Terminull.app`, embeds version `0.1.3`, and signs the app bundle after resources are written. By default it uses ad-hoc signing for local verification.
+The local build script creates `dist/Terminull.app`, packages preview release `0.1.3b`, and signs the app bundle after resources are written. By default it uses ad-hoc signing for local verification.
 
 ```bash
 ./script/build_and_run.sh --package
 ```
 
-This creates `dist/Terminull-0.1.3-macOS-preview.zip` and `dist/SHA256SUMS.txt`.
+This creates `dist/Terminull-0.1.3b-macOS-preview.zip` and `dist/SHA256SUMS.txt`.
 
 Preview GitHub builds are not Developer ID signed or notarized yet, so macOS Gatekeeper may block them by default. For public distribution with a smoother install path, set `CODE_SIGN_IDENTITY` to a Developer ID Application certificate and complete Apple notarization before shipping the artifact.

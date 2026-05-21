@@ -67,6 +67,21 @@ struct TerminullApp: App {
     }
 }
 
+enum MainWindowCloseDecision: Equatable {
+    case allowWindowClose
+    case requestApplicationTermination
+}
+
+enum MainWindowCloseBehavior {
+    static func decision(isMainWindow: Bool, isQuitting: Bool) -> MainWindowCloseDecision {
+        guard isMainWindow, !isQuitting else {
+            return .allowWindowClose
+        }
+
+        return .requestApplicationTermination
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     weak var sessionStore: TerminalSessionStore?
     private weak var mainWindow: NSWindow?
@@ -87,12 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard sender === mainWindow, !isQuitting else {
+        switch MainWindowCloseBehavior.decision(isMainWindow: sender === mainWindow, isQuitting: isQuitting) {
+        case .allowWindowClose:
             return true
+        case .requestApplicationTermination:
+            NSApp.terminate(sender)
+            return false
         }
-
-        _ = sessionStore?.closeSelectedSession()
-        return false
     }
 
     func closeFocusedWindowOrSelectedTab() {

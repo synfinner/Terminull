@@ -1,7 +1,14 @@
 import Foundation
 import Security
 
-final class KeychainService {
+protocol KeychainManaging: AnyObject {
+    func saveSecret(_ secret: String, account: String) throws
+    func readSecret(account: String) throws -> String?
+    func hasSecret(account: String) -> Bool
+    func deleteSecret(account: String) throws
+}
+
+final class KeychainService: KeychainManaging {
     static let serviceName = "com.synfinner.Terminull.ssh-key-passphrase"
 
     func saveSecret(_ secret: String, account: String) throws {
@@ -62,13 +69,16 @@ final class KeychainService {
         (try? readSecret(account: account)) != nil
     }
 
-    func deleteSecret(account: String) {
+    func deleteSecret(account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.serviceName,
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError(status: status)
+        }
     }
 }
 

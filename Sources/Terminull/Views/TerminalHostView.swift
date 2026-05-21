@@ -85,6 +85,9 @@ struct TerminalHostView: NSViewRepresentable {
 
         session.didStartProcess = true
         session.state = .running
+        if let startupMessage = session.launch.startupMessage {
+            terminalView.feed(text: startupMessage)
+        }
         terminalView.startProcess(
             executable: session.launch.executable,
             args: session.launch.args,

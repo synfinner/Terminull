@@ -32,7 +32,7 @@ final class TerminalLaunchTests: XCTestCase {
     }
 
     func testReleaseMetadataIncludesVersionAboutCopyAndDonationAddresses() {
-        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.1")
+        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.2")
         XCTAssertTrue(TerminullReleaseMetadata.aboutText.contains("Terminull was built by synfinner. No tracking, no bs, just a terminal emulator with SSH management."))
         XCTAssertTrue(TerminullReleaseMetadata.donationText.contains("Donations are accepted via Bitcoin and Bitcoin Lightning."))
         XCTAssertEqual(TerminullReleaseMetadata.bitcoinAddress, "bc1qqfrapakl4yceqs99k84j3tznjsa9c59mklvsvm")
@@ -77,6 +77,7 @@ final class TerminalLaunchTests: XCTestCase {
         XCTAssertTrue(launch.args.contains("deploy@example.com"))
         XCTAssertTrue(launch.args.contains("2222"))
         XCTAssertEqual(launch.args.suffix(2), ["--", "deploy@example.com"])
+        XCTAssertEqual(launch.startupMessage, "Connecting to deploy@example.com:2222...\r\n")
     }
 
     func testSSHLaunchTerminatesOptionsBeforeHost() {
@@ -147,6 +148,61 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertEqual(SSHAgentService.addIdentityArguments(keyPath: keyPath), ["-q", "--", keyPath])
         XCTAssertEqual(SSHAgentService.removeIdentityArguments(keyPath: keyPath), ["-q", "-d", "--", keyPath])
+    }
+
+    func testStoredPassphraseIsReadBeforeSSHAddAndPassedThroughStandardInput() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        let keyURL = temporaryDirectory.appendingPathComponent("id_ed25519")
+        FileManager.default.createFile(atPath: keyURL.path, contents: Data("key".utf8))
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            identityFilePath: keyURL.path,
+            storesKeyPassphrase: true
+        )
+        let keychain = SpyKeychainStore()
+        keychain.secrets[profile.id.uuidString] = "stored-passphrase"
+        var events: [String] = []
+        keychain.onRead = {
+            events.append("keychain-read")
+        }
+        var sshAddInput: Data?
+
+        let service = SSHAgentService(keychain: keychain) { process, _, _, standardInput in
+            switch process.executableURL?.path {
+            case "/usr/bin/ssh-agent":
+                events.append("ssh-agent")
+                let socketPath = process.arguments?[1] ?? "/tmp/tnl-test/a-test.sock"
+                return SSHAgentProcessResult(
+                    stdout: "SSH_AUTH_SOCK=\(socketPath); export SSH_AUTH_SOCK;\nSSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                    stderr: "",
+                    terminationStatus: 0
+                )
+            case "/usr/bin/ssh-add":
+                events.append("ssh-add")
+                sshAddInput = standardInput
+                XCTAssertNil(process.environment?["SSH_ASKPASS"])
+                XCTAssertNil(process.environment?["SSH_ASKPASS_REQUIRE"])
+                return SSHAgentProcessResult(stdout: "", stderr: "", terminationStatus: 0)
+            default:
+                XCTFail("Unexpected process: \(process.executableURL?.path ?? "nil")")
+                return SSHAgentProcessResult(stdout: "", stderr: "", terminationStatus: 1)
+            }
+        }
+
+        let preparation = service.prepareIdentityIfNeeded(for: profile)
+
+        XCTAssertNil(preparation.warning)
+        XCTAssertEqual(events, ["keychain-read", "ssh-agent", "ssh-add"])
+        XCTAssertEqual(sshAddInput, Data("stored-passphrase\n".utf8))
+        XCTAssertNotNil(preparation.terminalEnvironment?.first { $0.hasPrefix("SSH_AUTH_SOCK=") })
     }
 
     func testSSHAgentSocketPathUsesShortRuntimeLocation() {
@@ -311,6 +367,54 @@ final class TerminalLaunchTests: XCTestCase {
         )
     }
 
+    func testClickableCursorMovementUsesLineEditorControlsAtLineEdges() {
+        XCTAssertEqual(
+            ClickableTerminalCursorMovement.movementBytes(
+                fromColumn: 8,
+                toColumn: 0,
+                columnCount: 80,
+                applicationCursor: false
+            ),
+            [0x01]
+        )
+        XCTAssertEqual(
+            ClickableTerminalCursorMovement.movementBytes(
+                fromColumn: 8,
+                toColumn: 79,
+                columnCount: 80,
+                applicationCursor: false
+            ),
+            [0x05]
+        )
+    }
+
+    func testClickableCursorMovementTreatsClicksOutsideContentAsLineEdges() {
+        XCTAssertEqual(
+            ClickableTerminalCursorMovement.targetColumn(
+                clickedColumn: 18,
+                columnCount: 80,
+                contentRange: 0...12
+            ),
+            79
+        )
+        XCTAssertEqual(
+            ClickableTerminalCursorMovement.targetColumn(
+                clickedColumn: -2,
+                columnCount: 80,
+                contentRange: 4...12
+            ),
+            0
+        )
+        XCTAssertEqual(
+            ClickableTerminalCursorMovement.targetColumn(
+                clickedColumn: 8,
+                columnCount: 80,
+                contentRange: 4...12
+            ),
+            8
+        )
+    }
+
     func testClickableCursorMovementOnlyAllowsSameRowNormalScreenClicks() {
         XCTAssertTrue(
             ClickableTerminalCursorMovement.shouldHandle(
@@ -419,6 +523,115 @@ final class TerminalLaunchTests: XCTestCase {
         try FileManager.default.removeItem(at: temporaryDirectory)
     }
 
+    func testConnectionStoreDeletePersistsAcrossReload() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy")
+
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertTrue(store.upsert(profile))
+
+        XCTAssertTrue(store.delete(profile))
+
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [])
+        let storedData = try Data(contentsOf: storageURL)
+        let storedProfiles = try JSONDecoder().decode([ConnectionProfile].self, from: storedData)
+        XCTAssertEqual(storedProfiles, [])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreAddSavesKeychainSecretWithProfile() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", storesKeyPassphrase: true)
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+
+        XCTAssertTrue(store.upsert(profile, keychainUpdate: .saveSecret("secret")))
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertEqual(keychain.secrets[profile.id.uuidString], "secret")
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [profile])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreRollsBackNewKeychainSecretWhenAddPersistenceFails() throws {
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: storageURL, withIntermediateDirectories: true)
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", storesKeyPassphrase: true)
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+
+        XCTAssertFalse(store.upsert(profile, keychainUpdate: .saveSecret("secret")))
+
+        XCTAssertEqual(store.profiles, [])
+        XCTAssertNil(keychain.secrets[profile.id.uuidString])
+        try FileManager.default.removeItem(at: storageURL)
+    }
+
+    func testConnectionStoreDeleteRemovesKeychainSecretWithProfile() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", storesKeyPassphrase: true)
+        keychain.secrets[profile.id.uuidString] = "secret"
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertTrue(store.upsert(profile))
+
+        XCTAssertTrue(store.delete(profile))
+
+        XCTAssertEqual(store.profiles, [])
+        XCTAssertNil(keychain.secrets[profile.id.uuidString])
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreDoesNotDeleteProfileWhenKeychainDeleteFails() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", storesKeyPassphrase: true)
+        keychain.secrets[profile.id.uuidString] = "secret"
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertTrue(store.upsert(profile))
+        keychain.deleteError = KeychainError(status: errSecInteractionNotAllowed)
+
+        XCTAssertFalse(store.delete(profile))
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertEqual(keychain.secrets[profile.id.uuidString], "secret")
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [profile])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreDoesNotVisuallyDeleteWhenPersistenceFails() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy")
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertTrue(store.upsert(profile))
+
+        try FileManager.default.removeItem(at: storageURL)
+        try FileManager.default.createDirectory(at: storageURL, withIntermediateDirectories: true)
+
+        XCTAssertFalse(store.delete(profile))
+
+        XCTAssertEqual(store.profiles, [profile])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
     func testConnectionStoreDoesNotCommitInMemoryProfilesWhenPersistenceFails() throws {
         let storageURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -451,7 +664,7 @@ final class TerminalLaunchTests: XCTestCase {
         store.openLocal()
         let second = store.sessions[1]
 
-        store.handleProcessExit(second)
+        store.handleProcessExit(second, exitCode: 0)
 
         XCTAssertEqual(store.sessions.map(\.id), [first.id])
         XCTAssertEqual(store.selectedSessionID, first.id)
@@ -464,7 +677,7 @@ final class TerminalLaunchTests: XCTestCase {
         store.openLocal()
         let second = store.sessions[1]
 
-        store.handleProcessExit(first)
+        store.handleProcessExit(first, exitCode: 0)
 
         XCTAssertEqual(store.sessions.map(\.id), [second.id])
         XCTAssertEqual(store.selectedSessionID, second.id)
@@ -475,7 +688,7 @@ final class TerminalLaunchTests: XCTestCase {
         store.openLocal()
         let original = store.sessions[0]
 
-        store.handleProcessExit(original)
+        store.handleProcessExit(original, exitCode: 0)
 
         XCTAssertEqual(store.sessions.count, 1)
         XCTAssertNotEqual(store.sessions[0].id, original.id)
@@ -522,6 +735,34 @@ final class TerminalLaunchTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, store.sessions[0].id)
         XCTAssertTrue(original.isClosed)
     }
+
+    func testMainWindowCloseRequestsApplicationTerminationInsteadOfClosingTab() {
+        XCTAssertEqual(
+            MainWindowCloseBehavior.decision(isMainWindow: true, isQuitting: false),
+            .requestApplicationTermination
+        )
+        XCTAssertEqual(
+            MainWindowCloseBehavior.decision(isMainWindow: true, isQuitting: true),
+            .allowWindowClose
+        )
+        XCTAssertEqual(
+            MainWindowCloseBehavior.decision(isMainWindow: false, isQuitting: false),
+            .allowWindowClose
+        )
+    }
+
+    func testRemoteNonzeroProcessExitKeepsSessionVisibleForDiagnostics() {
+        let store = TerminalSessionStore()
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy")
+        store.openSSH(profile: profile)
+        let session = store.sessions[0]
+
+        store.handleProcessExit(session, exitCode: 255)
+
+        XCTAssertEqual(store.sessions.map(\.id), [session.id])
+        XCTAssertEqual(store.selectedSessionID, session.id)
+        XCTAssertFalse(session.isClosed)
+    }
 }
 
 private final class SpySSHAgentService: SSHAgentManaging {
@@ -543,5 +784,39 @@ private final class SpySSHAgentService: SSHAgentManaging {
 
     func shutdown() {
         shutdownCallCount += 1
+    }
+}
+
+private final class SpyKeychainStore: KeychainManaging {
+    var secrets: [String: String] = [:]
+    var saveError: Error?
+    var readError: Error?
+    var deleteError: Error?
+    var onRead: (() -> Void)?
+
+    func saveSecret(_ secret: String, account: String) throws {
+        if let saveError {
+            throw saveError
+        }
+        secrets[account] = secret
+    }
+
+    func readSecret(account: String) throws -> String? {
+        onRead?()
+        if let readError {
+            throw readError
+        }
+        return secrets[account]
+    }
+
+    func hasSecret(account: String) -> Bool {
+        secrets[account] != nil
+    }
+
+    func deleteSecret(account: String) throws {
+        if let deleteError {
+            throw deleteError
+        }
+        secrets[account] = nil
     }
 }

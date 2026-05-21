@@ -117,7 +117,7 @@ final class TerminalSessionProcessObserver: NSObject, LocalProcessTerminalViewDe
     func processDidTerminate(exitCode: Int32?) {
         withSessionOnMain { [weak self] session in
             session.state = .exited(exitCode)
-            self?.sessionStore?.handleProcessExit(session)
+            self?.sessionStore?.handleProcessExit(session, exitCode: exitCode)
         }
     }
 

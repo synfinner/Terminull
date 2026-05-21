@@ -7,7 +7,7 @@ struct ConnectionEditorView: View {
     @EnvironmentObject private var preferencesStore: PreferencesStore
 
     private let existingProfile: ConnectionProfile?
-    private let keychain = KeychainService()
+    private let keychain: any KeychainManaging
 
     @State private var name: String
     @State private var host: String
@@ -22,8 +22,9 @@ struct ConnectionEditorView: View {
         preferencesStore.preferences.theme.chrome
     }
 
-    init(profile: ConnectionProfile?) {
+    init(profile: ConnectionProfile?, keychain: any KeychainManaging = KeychainService()) {
         existingProfile = profile
+        self.keychain = keychain
         _name = State(initialValue: profile?.name ?? "")
         _host = State(initialValue: profile?.host ?? "")
         _username = State(initialValue: profile?.username ?? NSUserName())
@@ -170,7 +171,12 @@ struct ConnectionEditorView: View {
         }
 
         let id = existingProfile?.id ?? UUID()
-        let shouldKeepExistingPassphrase = keyPassphrase.isEmpty && existingProfile?.storesKeyPassphrase == true && rememberPassphrase
+        let hasExistingPassphrase = existingProfile?.storesKeyPassphrase == true && keychain.hasSecret(account: id.uuidString)
+        let shouldKeepExistingPassphrase = keyPassphrase.isEmpty && hasExistingPassphrase && rememberPassphrase
+        if rememberPassphrase && keyPassphrase.isEmpty && !shouldKeepExistingPassphrase {
+            validationMessage = "Key passphrase is required when saving to Keychain."
+            return
+        }
         let shouldStorePassphrase = rememberPassphrase && (!keyPassphrase.isEmpty || shouldKeepExistingPassphrase)
 
         let profile = ConnectionProfile(
@@ -184,34 +190,21 @@ struct ConnectionEditorView: View {
             lastConnectedAt: existingProfile?.lastConnectedAt
         )
 
-        do {
-            if shouldStorePassphrase && !keyPassphrase.isEmpty {
-                let previousSecret = try? keychain.readSecret(account: id.uuidString)
-                try keychain.saveSecret(keyPassphrase, account: id.uuidString)
-
-                guard connectionStore.upsert(profile) else {
-                    if let previousSecret {
-                        try? keychain.saveSecret(previousSecret, account: id.uuidString)
-                    } else {
-                        keychain.deleteSecret(account: id.uuidString)
-                    }
-                    validationMessage = "Could not save connection."
-                    return
-                }
-            } else {
-                guard connectionStore.upsert(profile) else {
-                    validationMessage = "Could not save connection."
-                    return
-                }
-
-                if !shouldStorePassphrase {
-                    keychain.deleteSecret(account: id.uuidString)
-                }
-            }
-            dismiss()
-        } catch {
-            validationMessage = "Could not save passphrase: \(error.localizedDescription)"
+        let keychainUpdate: ConnectionKeychainUpdate
+        if shouldStorePassphrase, !keyPassphrase.isEmpty {
+            keychainUpdate = .saveSecret(keyPassphrase)
+        } else if !shouldStorePassphrase, existingProfile?.storesKeyPassphrase == true {
+            keychainUpdate = .deleteSecret
+        } else {
+            keychainUpdate = .unchanged
         }
+
+        guard connectionStore.upsert(profile, keychainUpdate: keychainUpdate) else {
+            validationMessage = "Could not save connection."
+            return
+        }
+
+        dismiss()
     }
 }
 

@@ -32,6 +32,49 @@ enum ClickableTerminalCursorMovement {
 
         return Array(repeating: sequence, count: abs(distance)).flatMap { $0 }
     }
+
+    static func movementBytes(
+        fromColumn: Int,
+        toColumn: Int,
+        columnCount: Int,
+        applicationCursor: Bool
+    ) -> [UInt8] {
+        let maxColumn = max(0, columnCount - 1)
+        if toColumn <= 0 {
+            return [0x01]
+        }
+        if toColumn >= maxColumn {
+            return [0x05]
+        }
+
+        return arrowBytes(
+            fromColumn: fromColumn,
+            toColumn: toColumn,
+            applicationCursor: applicationCursor
+        )
+    }
+
+    static func targetColumn(
+        clickedColumn: Int,
+        columnCount: Int,
+        contentRange: ClosedRange<Int>?
+    ) -> Int {
+        let maxColumn = max(0, columnCount - 1)
+        let clampedColumn = min(max(clickedColumn, 0), maxColumn)
+
+        guard let contentRange else {
+            return clampedColumn
+        }
+
+        if clickedColumn <= contentRange.lowerBound {
+            return 0
+        }
+        if clickedColumn > contentRange.upperBound {
+            return maxColumn
+        }
+
+        return clampedColumn
+    }
 }
 
 final class ClickableLocalProcessTerminalView: LocalProcessTerminalView {
@@ -61,9 +104,10 @@ final class ClickableLocalProcessTerminalView: LocalProcessTerminalView {
             return false
         }
 
-        let bytes = ClickableTerminalCursorMovement.arrowBytes(
+        let bytes = ClickableTerminalCursorMovement.movementBytes(
             fromColumn: terminal.buffer.x,
             toColumn: targetColumn,
+            columnCount: terminal.cols,
             applicationCursor: terminal.applicationCursor
         )
         if !bytes.isEmpty {
@@ -99,6 +143,35 @@ final class ClickableLocalProcessTerminalView: LocalProcessTerminalView {
 
         let width = max(1, caretFrame.width)
         let clickedColumn = Int(point.x / width)
-        return min(max(clickedColumn, 0), terminal.cols - 1)
+        return ClickableTerminalCursorMovement.targetColumn(
+            clickedColumn: clickedColumn,
+            columnCount: terminal.cols,
+            contentRange: visibleContentRange(for: cursorRow)
+        )
+    }
+
+    private func visibleContentRange(for row: Int) -> ClosedRange<Int>? {
+        guard let line = terminal.getLine(row: row) else {
+            return nil
+        }
+
+        let maxColumn = min(line.count, terminal.cols) - 1
+        guard maxColumn >= 0 else {
+            return nil
+        }
+
+        var firstColumn: Int?
+        var lastColumn: Int?
+        for column in 0...maxColumn where line.hasContent(index: column) {
+            if firstColumn == nil {
+                firstColumn = column
+            }
+            lastColumn = column
+        }
+
+        guard let firstColumn, let lastColumn else {
+            return nil
+        }
+        return firstColumn...lastColumn
     }
 }

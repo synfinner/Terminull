@@ -12,17 +12,31 @@ protocol SSHAgentManaging: AnyObject {
     func shutdown()
 }
 
+struct SSHAgentProcessResult {
+    let stdout: String
+    let stderr: String
+    let terminationStatus: Int32
+}
+
+typealias SSHAgentProcessRunner = (Process, TimeInterval, String, Data?) throws -> SSHAgentProcessResult
+
 final class SSHAgentService: SSHAgentManaging {
     static let maximumUnixSocketPathLength = 100
 
     private static let processTimeoutSeconds: TimeInterval = 10
     private static let socketTokenLength = 8
 
-    private let keychain = KeychainService()
+    private let keychain: any KeychainManaging
+    private let runProcess: SSHAgentProcessRunner
     private let agentLock = NSLock()
     private var agent: SSHAgent?
 
-    init() {
+    init(
+        keychain: any KeychainManaging = KeychainService(),
+        processRunner: @escaping SSHAgentProcessRunner = SSHAgentService.run
+    ) {
+        self.keychain = keychain
+        self.runProcess = processRunner
         Self.removeStaleAskPassScripts()
         Self.removeStaleAgentSockets()
         Self.removeStaleAgentSockets(directory: Self.fallbackAgentSocketDirectory)
@@ -48,13 +62,16 @@ final class SSHAgentService: SSHAgentManaging {
             return SSHAgentPreparation(warning: "The selected SSH key was not found. ssh will still start and report the exact failure.")
         }
 
-        guard profile.storesKeyPassphrase, keychain.hasSecret(account: profile.id.uuidString) else {
+        guard profile.storesKeyPassphrase else {
             return SSHAgentPreparation()
         }
 
         do {
+            guard let passphrase = try keychain.readSecret(account: profile.id.uuidString), !passphrase.isEmpty else {
+                return SSHAgentPreparation(warning: "Saved passphrase was not found in Keychain. ssh will still start and may prompt in the terminal.")
+            }
             let agent = try ensureAgent()
-            try addIdentityToAgent(keyPath: keyPath, account: profile.id.uuidString, agent: agent)
+            try addIdentityToAgent(keyPath: keyPath, passphrase: passphrase, agent: agent)
             return SSHAgentPreparation(terminalEnvironment: TerminalEnvironment.variables(extra: agent.environment))
         } catch {
             return SSHAgentPreparation(warning: "Saved passphrase could not be added to ssh-agent: \(error.localizedDescription)")
@@ -87,32 +104,29 @@ final class SSHAgentService: SSHAgentManaging {
         Self.removeStaleAgentSockets(directory: Self.legacyAgentSocketDirectory)
     }
 
-    private func addIdentityToAgent(keyPath: String, account: String, agent: SSHAgent) throws {
-        let scriptURL = try askPassScriptURL(account: account)
-        defer {
-            try? FileManager.default.removeItem(at: scriptURL)
-        }
-
-        var environment = agent.environment
-        environment["SSH_ASKPASS"] = scriptURL.path
-        environment["SSH_ASKPASS_REQUIRE"] = "force"
-        environment["DISPLAY"] = environment["DISPLAY"] ?? "localhost:0"
-
-        try runSSHAdd(arguments: Self.addIdentityArguments(keyPath: keyPath), environment: environment)
+    private func addIdentityToAgent(keyPath: String, passphrase: String, agent: SSHAgent) throws {
+        try runSSHAdd(
+            arguments: Self.addIdentityArguments(keyPath: keyPath),
+            environment: agent.environment,
+            standardInput: Self.sshAddPassphraseInput(passphrase)
+        )
     }
 
-    private func runSSHAdd(arguments: [String], environment: [String: String]) throws {
+    private func runSSHAdd(
+        arguments: [String],
+        environment: [String: String],
+        standardInput: Data? = nil
+    ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
         process.arguments = arguments
         process.environment = Self.sshAddEnvironment(extra: environment)
-        process.standardInput = FileHandle(forReadingAtPath: "/dev/null")
 
-        let result = try run(process: process, timeout: Self.processTimeoutSeconds, label: "ssh-add")
+        let result = try runProcess(process, Self.processTimeoutSeconds, "ssh-add", standardInput)
 
-        if process.terminationStatus != 0 {
+        if result.terminationStatus != 0 {
             let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw SSHAgentError(message: message.isEmpty ? "ssh-add exited with \(process.terminationStatus)" : message)
+            throw SSHAgentError(message: message.isEmpty ? "ssh-add exited with \(result.terminationStatus)" : message)
         }
     }
 
@@ -133,12 +147,12 @@ final class SSHAgentService: SSHAgentManaging {
         process.arguments = ["-a", socketURL.path, "-s"]
         process.environment = TerminalEnvironment.processEnvironment()
 
-        let result = try run(process: process, timeout: Self.processTimeoutSeconds, label: "ssh-agent")
+        let result = try runProcess(process, Self.processTimeoutSeconds, "ssh-agent", nil)
 
         let output = result.stdout
-        if process.terminationStatus != 0 {
+        if result.terminationStatus != 0 {
             let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw SSHAgentError(message: error.isEmpty ? "ssh-agent exited with \(process.terminationStatus)" : error)
+            throw SSHAgentError(message: error.isEmpty ? "ssh-agent exited with \(result.terminationStatus)" : error)
         }
 
         let parsed = Self.parseAgentOutput(output)
@@ -167,35 +181,28 @@ final class SSHAgentService: SSHAgentManaging {
         self.agent = nil
     }
 
-    private func askPassScriptURL(account: String) throws -> URL {
-        let directory = SupportPaths.applicationSupportDirectory.appendingPathComponent("askpass", isDirectory: true)
-        try FileManager.default.createPrivateDirectory(at: directory)
-        let url = directory.appendingPathComponent("\(account)-\(UUID().uuidString).sh")
-        let script = """
-        #!/bin/sh
-        exec /usr/bin/security find-generic-password -s \(Self.shellQuote(KeychainService.serviceName)) -a \(Self.shellQuote(account)) -w 2>/dev/null
-        """
-        do {
-            try script.write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-        } catch {
-            try? FileManager.default.removeItem(at: url)
-            throw error
-        }
-        return url
-    }
-
-    private func run(process: Process, timeout: TimeInterval, label: String) throws -> (stdout: String, stderr: String) {
+    private static func run(
+        process: Process,
+        timeout: TimeInterval,
+        label: String,
+        standardInput: Data?
+    ) throws -> SSHAgentProcessResult {
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         let finished = DispatchSemaphore(value: 0)
+        let inputPipe = standardInput.map { _ in Pipe() }
 
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        process.standardInput = inputPipe ?? FileHandle(forReadingAtPath: "/dev/null")
         process.terminationHandler = { _ in
             finished.signal()
         }
 
+        if let standardInput, let inputPipe {
+            inputPipe.fileHandleForWriting.write(standardInput)
+            try? inputPipe.fileHandleForWriting.close()
+        }
         try process.run()
 
         if finished.wait(timeout: .now() + timeout) == .timedOut {
@@ -209,11 +216,7 @@ final class SSHAgentService: SSHAgentManaging {
 
         let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return (stdout, stderr)
-    }
-
-    private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return SSHAgentProcessResult(stdout: stdout, stderr: stderr, terminationStatus: process.terminationStatus)
     }
 
     static func sshAddEnvironment(
@@ -242,6 +245,10 @@ final class SSHAgentService: SSHAgentManaging {
 
     static func removeIdentityArguments(keyPath: String) -> [String] {
         ["-q", "-d", "--", keyPath]
+    }
+
+    static func sshAddPassphraseInput(_ passphrase: String) -> Data {
+        Data("\(passphrase)\n".utf8)
     }
 
     static func agentSocketDirectory(runtimeRoot: URL = FileManager.default.temporaryDirectory) -> URL {

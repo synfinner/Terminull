@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="Terminull"
-APP_VERSION="0.1.1"
+APP_VERSION="0.1.2"
 BUNDLE_ID="com.synfinner.Terminull"
 MIN_SYSTEM_VERSION="14.0"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"

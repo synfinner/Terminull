@@ -59,7 +59,11 @@ final class TerminalSessionStore: ObservableObject {
         return true
     }
 
-    func handleProcessExit(_ session: TerminalSession) {
+    func handleProcessExit(_ session: TerminalSession, exitCode: Int32?) {
+        if session.isRemote, exitCode != 0 {
+            return
+        }
+
         remove(session, terminate: false)
     }
 

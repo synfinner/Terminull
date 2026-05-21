@@ -6,6 +6,7 @@ struct TerminalLaunch: Equatable {
     var environment: [String]?
     var execName: String?
     var currentDirectory: String?
+    var startupMessage: String?
 
     static func localShell() -> TerminalLaunch {
         let shell = ShellResolver.defaultShell()
@@ -15,7 +16,8 @@ struct TerminalLaunch: Equatable {
             args: [],
             environment: nil,
             execName: "-\(shellName)",
-            currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path
+            currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path,
+            startupMessage: nil
         )
     }
 
@@ -42,7 +44,8 @@ struct TerminalLaunch: Equatable {
             args: args,
             environment: environment,
             execName: nil,
-            currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path
+            currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path,
+            startupMessage: "Connecting to \(profile.target):\(profile.port)...\r\n"
         )
     }
 }

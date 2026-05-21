@@ -9,9 +9,17 @@ final class TerminalSessionStore: ObservableObject {
     @Published var selectedSessionID: UUID?
 
     private let sshAgentService: SSHAgentManaging
+    private let keychain: any KeychainManaging
+    private let askPassExecutablePath: () -> String?
 
-    init(sshAgentService: SSHAgentManaging = SSHAgentService()) {
+    init(
+        sshAgentService: SSHAgentManaging = SSHAgentService(),
+        keychain: any KeychainManaging = KeychainService(),
+        askPassExecutablePath: @escaping () -> String? = { SSHLoginPasswordAskPass.executablePath() }
+    ) {
         self.sshAgentService = sshAgentService
+        self.keychain = keychain
+        self.askPassExecutablePath = askPassExecutablePath
     }
 
     var selectedSession: TerminalSession? {
@@ -28,15 +36,21 @@ final class TerminalSessionStore: ObservableObject {
     }
 
     func openSSH(profile: ConnectionProfile) {
+        let sessionID = UUID()
         let preparation = sshAgentService.prepareIdentityIfNeeded(for: profile)
+        let loginPasswordPreparation = savedLoginPasswordEnvironment(for: profile, sessionID: sessionID)
         let session = TerminalSession(
+            id: sessionID,
             title: profile.displayName,
             subtitle: profile.target,
-            launch: .ssh(profile: profile, environment: preparation.terminalEnvironment),
+            launch: .ssh(
+                profile: profile,
+                environment: combinedEnvironment(preparation.terminalEnvironment, loginPasswordPreparation.environment)
+            ),
             profileID: profile.id,
             isRemote: true,
             profile: profile,
-            warning: preparation.warning
+            warning: combinedWarning(preparation.warning, loginPasswordPreparation.warning)
         )
         add(session)
     }
@@ -60,6 +74,8 @@ final class TerminalSessionStore: ObservableObject {
     }
 
     func handleProcessExit(_ session: TerminalSession, exitCode: Int32?) {
+        deleteAskPassToken(for: session)
+
         if session.isRemote, exitCode != 0 {
             return
         }
@@ -97,6 +113,7 @@ final class TerminalSessionStore: ObservableObject {
 
         let closedProfile = session.profile
         session.isClosed = true
+        deleteAskPassToken(for: session)
         if terminate {
             terminateSessionProcess(session.terminalView)
         }
@@ -121,6 +138,87 @@ final class TerminalSessionStore: ObservableObject {
         session.processObserver.sessionStore = self
         sessions.append(session)
         selectedSessionID = session.id
+    }
+
+    private func savedLoginPasswordEnvironment(
+        for profile: ConnectionProfile,
+        sessionID: UUID
+    ) -> (environment: [String]?, warning: String?) {
+        guard profile.storesLoginPassword else {
+            return (nil, nil)
+        }
+
+        do {
+            guard try keychain.readSecret(account: ConnectionSecretAccount.loginPassword(for: profile.id)) != nil else {
+                return (nil, "Saved SSH login password was not found in Keychain. ssh will still start and may prompt in the terminal.")
+            }
+            guard let executablePath = askPassExecutablePath(),
+                  FileManager.default.isExecutableFile(atPath: executablePath) else {
+                return (nil, "Saved SSH login password could not be used because the Terminull executable was not found.")
+            }
+
+            let token = try SSHLoginPasswordAskPass.makeToken()
+            let tokenAccount = ConnectionSecretAccount.loginPasswordAskPassToken(
+                for: profile.id,
+                sessionID: sessionID
+            )
+            try? keychain.deleteSecret(account: tokenAccount)
+            try keychain.saveSecret(token, account: tokenAccount)
+
+            return (
+                SSHLoginPasswordAskPass.environment(
+                    account: ConnectionSecretAccount.loginPassword(for: profile.id),
+                    tokenAccount: tokenAccount,
+                    token: token,
+                    executablePath: executablePath
+                ),
+                nil
+            )
+        } catch {
+            return (nil, "Saved SSH login password could not be read from Keychain: \(error.localizedDescription)")
+        }
+    }
+
+    private func combinedEnvironment(_ first: [String]?, _ second: [String]?) -> [String]? {
+        guard first != nil || second != nil else {
+            return nil
+        }
+
+        var merged = TerminalEnvironment.processEnvironment()
+        for variables in [first, second] {
+            for variable in variables ?? [] {
+                let parts = variable.split(separator: "=", maxSplits: 1)
+                guard parts.count == 2 else {
+                    continue
+                }
+                merged[String(parts[0])] = String(parts[1])
+            }
+        }
+        return merged.isEmpty ? nil : merged.map { "\($0.key)=\($0.value)" }.sorted()
+    }
+
+    private func combinedWarning(_ first: String?, _ second: String?) -> String? {
+        switch (first, second) {
+        case (.some(let first), .some(let second)):
+            return "\(first)\n\(second)"
+        case (.some(let first), .none):
+            return first
+        case (.none, .some(let second)):
+            return second
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private func deleteAskPassToken(for session: TerminalSession) {
+        guard let profileID = session.profileID else {
+            return
+        }
+
+        try? keychain.deleteSecret(account: ConnectionSecretAccount.loginPasswordAskPassToken(
+            for: profileID,
+            sessionID: session.id
+        ))
     }
 
     private func terminateSessionProcess(_ terminalView: LocalProcessTerminalView?) {

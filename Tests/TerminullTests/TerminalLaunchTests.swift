@@ -32,7 +32,7 @@ final class TerminalLaunchTests: XCTestCase {
     }
 
     func testReleaseMetadataIncludesVersionAboutCopyAndDonationAddresses() {
-        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.2")
+        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.3")
         XCTAssertTrue(TerminullReleaseMetadata.aboutText.contains("Terminull was built by synfinner. No tracking, no bs, just a terminal emulator with SSH management."))
         XCTAssertTrue(TerminullReleaseMetadata.donationText.contains("Donations are accepted via Bitcoin and Bitcoin Lightning."))
         XCTAssertEqual(TerminullReleaseMetadata.bitcoinAddress, "bc1qqfrapakl4yceqs99k84j3tznjsa9c59mklvsvm")
@@ -51,6 +51,24 @@ final class TerminalLaunchTests: XCTestCase {
         let profile = ConnectionProfile(name: "Bastion", host: "bastion.internal", username: "")
 
         XCTAssertEqual(profile.target, "bastion.internal")
+    }
+
+    func testConnectionProfileDecodesMissingLoginPasswordStorageFlag() throws {
+        let data = """
+        {
+          "id": "04BED745-3DC2-4BB8-926D-3A5BF09A56D0",
+          "name": "Prod",
+          "host": "example.com",
+          "username": "deploy",
+          "port": 22,
+          "identityFilePath": "",
+          "storesKeyPassphrase": false
+        }
+        """.data(using: .utf8)!
+
+        let profile = try JSONDecoder().decode(ConnectionProfile.self, from: data)
+
+        XCTAssertFalse(profile.storesLoginPassword)
     }
 
     func testSSHLaunchUsesSystemOpenSSHWithoutOpenSSHKeychainStorage() {
@@ -91,6 +109,38 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertEqual(launch.executable, "/usr/bin/ssh")
         XCTAssertEqual(launch.args.suffix(2), ["--", "-oProxyCommand=open /Applications/Calculator.app"])
+    }
+
+    func testSSHLaunchLimitsPromptsWhenSavedLoginPasswordIsConfigured() {
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+
+        let launch = TerminalLaunch.ssh(profile: profile)
+
+        XCTAssertTrue(launch.args.contains("NumberOfPasswordPrompts=1"))
+        XCTAssertTrue(launch.args.contains("PasswordAuthentication=yes"))
+        XCTAssertTrue(launch.args.contains("KbdInteractiveAuthentication=no"))
+        XCTAssertTrue(launch.args.contains("PreferredAuthentications=password"))
+        XCTAssertTrue(launch.args.contains("PubkeyAuthentication=no"))
+    }
+
+    func testSSHLaunchAllowsPublicKeyBeforeSavedLoginPasswordWhenKeyIsConfigured() {
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            identityFilePath: "/Users/test/.ssh/id_ed25519",
+            storesLoginPassword: true
+        )
+
+        let launch = TerminalLaunch.ssh(profile: profile)
+
+        XCTAssertTrue(launch.args.contains("PreferredAuthentications=publickey,password"))
+        XCTAssertFalse(launch.args.contains("PubkeyAuthentication=no"))
     }
 
     func testSSHLaunchPassesPreparedAgentEnvironment() {
@@ -263,7 +313,9 @@ final class TerminalLaunchTests: XCTestCase {
 
         store.openSSH(profile: profile)
 
-        XCTAssertEqual(store.sessions.first?.launch.environment, ["SSH_AUTH_SOCK=/tmp/terminull-agent.sock"])
+        let environment = store.sessions.first?.launch.environment ?? []
+        XCTAssertTrue(environment.contains("SSH_AUTH_SOCK=/tmp/terminull-agent.sock"))
+        XCTAssertTrue(environment.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
     }
 
     func testClosingProfileSessionsRemovesIdentityAndStartsReplacementIfNeeded() {
@@ -478,6 +530,136 @@ final class TerminalLaunchTests: XCTestCase {
         )
     }
 
+    func testConnectionEditorPromptsToSavePassphraseWhenKeyIsChosen() {
+        XCTAssertTrue(
+            ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
+                keyPath: "/Users/synfinner/.ssh/id_ed25519",
+                rememberPassphrase: false,
+                existingStoresKeyPassphrase: false,
+                skippedPrompt: false
+            )
+        )
+        XCTAssertFalse(
+            ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
+                keyPath: "",
+                rememberPassphrase: false,
+                existingStoresKeyPassphrase: false,
+                skippedPrompt: false
+            )
+        )
+        XCTAssertFalse(
+            ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
+                keyPath: "/Users/synfinner/.ssh/id_ed25519",
+                rememberPassphrase: true,
+                existingStoresKeyPassphrase: false,
+                skippedPrompt: false
+            )
+        )
+        XCTAssertFalse(
+            ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
+                keyPath: "/Users/synfinner/.ssh/id_ed25519",
+                rememberPassphrase: false,
+                existingStoresKeyPassphrase: false,
+                skippedPrompt: true
+            )
+        )
+    }
+
+    func testSSHLoginPasswordAskPassEnvironmentUsesMainExecutableAndOneUseToken() {
+        let environment = SSHLoginPasswordAskPass.environment(
+            account: "profile-id:login-password",
+            tokenAccount: "profile-id:login-password-token:session-id",
+            token: "one-use-token",
+            executablePath: "/Applications/Terminull.app/Contents/MacOS/Terminull"
+        )
+
+        XCTAssertTrue(environment.contains("SSH_ASKPASS=/Applications/Terminull.app/Contents/MacOS/Terminull"))
+        XCTAssertTrue(environment.contains("SSH_ASKPASS_REQUIRE=force"))
+        XCTAssertTrue(environment.contains("DISPLAY=terminull"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_MODE=1"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_ACCOUNT=profile-id:login-password"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_TOKEN_ACCOUNT=profile-id:login-password-token:session-id"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_TOKEN=one-use-token"))
+    }
+
+    func testSSHLoginPasswordAskPassCommandPrintsPasswordAndConsumesToken() throws {
+        let keychain = SpyKeychainStore()
+        let account = "profile-id:login-password"
+        let tokenAccount = "profile-id:login-password-token:session-id"
+        keychain.secrets[account] = "login-secret"
+        keychain.secrets[tokenAccount] = "one-use-token"
+        let pipe = Pipe()
+
+        let exitCode = SSHLoginPasswordAskPassCommand.runIfRequested(
+            environment: [
+                SSHLoginPasswordAskPass.modeVariable: "1",
+                SSHLoginPasswordAskPass.accountVariable: account,
+                SSHLoginPasswordAskPass.tokenAccountVariable: tokenAccount,
+                SSHLoginPasswordAskPass.tokenVariable: "one-use-token"
+            ],
+            arguments: ["Terminull", "deploy@example.com's password:"],
+            keychain: keychain,
+            output: pipe.fileHandleForWriting
+        )
+        try pipe.fileHandleForWriting.close()
+
+        XCTAssertEqual(exitCode, 0)
+        XCTAssertEqual(String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8), "login-secret\n")
+        XCTAssertNil(keychain.secrets[tokenAccount])
+    }
+
+    func testSSHLoginPasswordAskPassCommandRejectsNonPasswordPromptsWithoutConsumingToken() throws {
+        let keychain = SpyKeychainStore()
+        let account = "profile-id:login-password"
+        let tokenAccount = "profile-id:login-password-token:session-id"
+        keychain.secrets[account] = "login-secret"
+        keychain.secrets[tokenAccount] = "one-use-token"
+        let pipe = Pipe()
+
+        let exitCode = SSHLoginPasswordAskPassCommand.runIfRequested(
+            environment: [
+                SSHLoginPasswordAskPass.modeVariable: "1",
+                SSHLoginPasswordAskPass.accountVariable: account,
+                SSHLoginPasswordAskPass.tokenAccountVariable: tokenAccount,
+                SSHLoginPasswordAskPass.tokenVariable: "one-use-token"
+            ],
+            arguments: ["Terminull", "Enter passphrase for key '/Users/test/.ssh/id_ed25519':"],
+            keychain: keychain,
+            output: pipe.fileHandleForWriting
+        )
+        try pipe.fileHandleForWriting.close()
+
+        XCTAssertEqual(exitCode, 1)
+        XCTAssertEqual(pipe.fileHandleForReading.readDataToEndOfFile(), Data())
+        XCTAssertEqual(keychain.secrets[tokenAccount], "one-use-token")
+    }
+
+    func testConnectionEditorLoginPasswordDecisionCanSaveKeepAndRemove() {
+        let save = ConnectionEditorLoginPasswordDecision.resolve(
+            enteredPassword: "secret",
+            existingStoresLoginPassword: false,
+            removeSavedPassword: false
+        )
+        XCTAssertTrue(save.storesLoginPassword)
+        XCTAssertEqual(save.keychainUpdate, .saveSecret("secret"))
+
+        let keep = ConnectionEditorLoginPasswordDecision.resolve(
+            enteredPassword: "",
+            existingStoresLoginPassword: true,
+            removeSavedPassword: false
+        )
+        XCTAssertTrue(keep.storesLoginPassword)
+        XCTAssertEqual(keep.keychainUpdate, .unchanged)
+
+        let remove = ConnectionEditorLoginPasswordDecision.resolve(
+            enteredPassword: "",
+            existingStoresLoginPassword: true,
+            removeSavedPassword: true
+        )
+        XCTAssertFalse(remove.storesLoginPassword)
+        XCTAssertEqual(remove.keychainUpdate, .deleteSecret)
+    }
+
     func testStaleAskPassScriptsAreRemoved() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -560,6 +742,83 @@ final class TerminalLaunchTests: XCTestCase {
         try FileManager.default.removeItem(at: temporaryDirectory)
     }
 
+    func testConnectionStoreAddSavesLoginPasswordWithProfile() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+
+        XCTAssertTrue(
+            store.upsert(
+                profile,
+                keychainUpdates: [
+                    .init(account: ConnectionSecretAccount.loginPassword(for: profile.id), update: .saveSecret("login-secret"))
+                ]
+            )
+        )
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertEqual(keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)], "login-secret")
+        let storedData = try Data(contentsOf: storageURL)
+        XCTAssertFalse(String(data: storedData, encoding: .utf8)?.contains("login-secret") ?? true)
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [profile])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreDoesNotAddProfileWhenLoginPasswordSaveFails() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        keychain.saveError = KeychainError(status: errSecInteractionNotAllowed)
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+
+        XCTAssertFalse(
+            store.upsert(
+                profile,
+                keychainUpdates: [
+                    .init(account: ConnectionSecretAccount.loginPassword(for: profile.id), update: .saveSecret("login-secret"))
+                ]
+            )
+        )
+
+        XCTAssertEqual(store.profiles, [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: storageURL.path))
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreReloadsProfilesAfterMarkConnectedWritesDate() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy")
+        let store = ConnectionStore(storageURL: storageURL)
+        XCTAssertTrue(store.upsert(profile))
+
+        store.markConnected(profile)
+
+        let reloadedStore = ConnectionStore(storageURL: storageURL)
+        XCTAssertEqual(reloadedStore.profiles.count, 1)
+        let reloadedProfile = try XCTUnwrap(reloadedStore.profiles.first)
+        XCTAssertEqual(reloadedProfile.id, profile.id)
+        XCTAssertNotNil(reloadedProfile.lastConnectedAt)
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
     func testConnectionStoreRollsBackNewKeychainSecretWhenAddPersistenceFails() throws {
         let storageURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -582,6 +841,7 @@ final class TerminalLaunchTests: XCTestCase {
         let keychain = SpyKeychainStore()
         let profile = ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", storesKeyPassphrase: true)
         keychain.secrets[profile.id.uuidString] = "secret"
+        keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)] = "login-secret"
         let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
         XCTAssertTrue(store.upsert(profile))
 
@@ -589,6 +849,7 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertEqual(store.profiles, [])
         XCTAssertNil(keychain.secrets[profile.id.uuidString])
+        XCTAssertNil(keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)])
         let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
         XCTAssertEqual(reloadedStore.profiles, [])
         try FileManager.default.removeItem(at: temporaryDirectory)
@@ -609,6 +870,31 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertEqual(store.profiles, [profile])
         XCTAssertEqual(keychain.secrets[profile.id.uuidString], "secret")
+        let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertEqual(reloadedStore.profiles, [profile])
+        try FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    func testConnectionStoreDoesNotDeleteProfileWhenLoginPasswordDeleteFails() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let storageURL = temporaryDirectory.appendingPathComponent("connections.json")
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+        keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)] = "login-secret"
+        let store = ConnectionStore(storageURL: storageURL, keychain: keychain)
+        XCTAssertTrue(store.upsert(profile))
+        keychain.deleteError = KeychainError(status: errSecInteractionNotAllowed)
+
+        XCTAssertFalse(store.delete(profile))
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertEqual(keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)], "login-secret")
         let reloadedStore = ConnectionStore(storageURL: storageURL, keychain: keychain)
         XCTAssertEqual(reloadedStore.profiles, [profile])
         try FileManager.default.removeItem(at: temporaryDirectory)
@@ -762,6 +1048,54 @@ final class TerminalLaunchTests: XCTestCase {
         XCTAssertEqual(store.sessions.map(\.id), [session.id])
         XCTAssertEqual(store.selectedSessionID, session.id)
         XCTAssertFalse(session.isClosed)
+    }
+
+    func testTerminalSessionStoreUsesAskPassForSavedLoginPassword() {
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+        keychain.secrets[ConnectionSecretAccount.loginPassword(for: profile.id)] = "login-secret"
+        let store = TerminalSessionStore(
+            sshAgentService: SpySSHAgentService(),
+            keychain: keychain,
+            askPassExecutablePath: { "/bin/echo" }
+        )
+
+        store.openSSH(profile: profile)
+
+        let environment = store.sessions.first?.launch.environment ?? []
+        XCTAssertTrue(environment.contains("SSH_ASKPASS=/bin/echo"))
+        XCTAssertTrue(environment.contains("SSH_ASKPASS_REQUIRE=force"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_MODE=1"))
+        XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_ACCOUNT=\(ConnectionSecretAccount.loginPassword(for: profile.id))"))
+        XCTAssertTrue(environment.contains { $0.hasPrefix("TERMINULL_ASKPASS_TOKEN_ACCOUNT=\(profile.id.uuidString):login-password-token:") })
+        XCTAssertTrue(environment.contains { $0.hasPrefix("TERMINULL_ASKPASS_TOKEN=") })
+        XCTAssertTrue(environment.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
+        XCTAssertFalse(environment.contains { $0.contains("login-secret") })
+        XCTAssertTrue(keychain.secrets.keys.contains { $0.hasPrefix("\(profile.id.uuidString):login-password-token:") })
+    }
+
+    func testTerminalSessionStoreWarnsWhenSavedLoginPasswordIsMissing() {
+        let keychain = SpyKeychainStore()
+        let profile = ConnectionProfile(
+            name: "Prod",
+            host: "example.com",
+            username: "deploy",
+            storesLoginPassword: true
+        )
+        let store = TerminalSessionStore(
+            sshAgentService: SpySSHAgentService(),
+            keychain: keychain,
+            askPassExecutablePath: { "/Applications/Terminull.app/Contents/MacOS/Terminull" }
+        )
+
+        store.openSSH(profile: profile)
+
+        XCTAssertTrue(store.sessions.first?.warning?.contains("Saved SSH login password was not found in Keychain") == true)
     }
 }
 

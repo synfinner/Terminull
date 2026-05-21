@@ -1,6 +1,6 @@
 import Foundation
 
-enum ConnectionKeychainUpdate {
+enum ConnectionKeychainUpdate: Equatable {
     case unchanged
     case saveSecret(String)
     case deleteSecret
@@ -12,6 +12,25 @@ enum ConnectionKeychainUpdate {
         case .saveSecret, .deleteSecret:
             return true
         }
+    }
+}
+
+struct ConnectionKeychainMutation {
+    let account: String
+    let update: ConnectionKeychainUpdate
+}
+
+enum ConnectionSecretAccount {
+    static func keyPassphrase(for profileID: UUID) -> String {
+        profileID.uuidString
+    }
+
+    static func loginPassword(for profileID: UUID) -> String {
+        "\(profileID.uuidString):login-password"
+    }
+
+    static func loginPasswordAskPassToken(for profileID: UUID, sessionID: UUID) -> String {
+        "\(profileID.uuidString):login-password-token:\(sessionID.uuidString)"
     }
 }
 
@@ -36,6 +55,22 @@ final class ConnectionStore: ObservableObject {
         _ profile: ConnectionProfile,
         keychainUpdate: ConnectionKeychainUpdate = .unchanged
     ) -> Bool {
+        upsert(
+            profile,
+            keychainUpdates: [
+                ConnectionKeychainMutation(
+                    account: ConnectionSecretAccount.keyPassphrase(for: profile.id),
+                    update: keychainUpdate
+                )
+            ]
+        )
+    }
+
+    @discardableResult
+    func upsert(
+        _ profile: ConnectionProfile,
+        keychainUpdates: [ConnectionKeychainMutation]
+    ) -> Bool {
         var updatedProfiles = profiles
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
             updatedProfiles[index] = profile
@@ -46,8 +81,7 @@ final class ConnectionStore: ObservableObject {
 
         return persist(
             updatedProfiles,
-            keychainUpdate: keychainUpdate,
-            account: profile.id.uuidString
+            keychainUpdates: keychainUpdates
         )
     }
 
@@ -62,8 +96,16 @@ final class ConnectionStore: ObservableObject {
         let updatedProfiles = profiles.filter { $0.id != profile.id }
         return persist(
             updatedProfiles,
-            keychainUpdate: .deleteSecret,
-            account: profile.id.uuidString
+            keychainUpdates: [
+                ConnectionKeychainMutation(
+                    account: ConnectionSecretAccount.keyPassphrase(for: profile.id),
+                    update: .deleteSecret
+                ),
+                ConnectionKeychainMutation(
+                    account: ConnectionSecretAccount.loginPassword(for: profile.id),
+                    update: .deleteSecret
+                )
+            ]
         )
     }
 
@@ -72,7 +114,7 @@ final class ConnectionStore: ObservableObject {
             profiles = []
             return
         }
-        profiles = (try? JSONDecoder().decode([ConnectionProfile].self, from: data)) ?? []
+        profiles = (try? JSONDecoder.connectionProfiles.decode([ConnectionProfile].self, from: data)) ?? []
     }
 
     private func save(_ profiles: [ConnectionProfile]) -> Bool {
@@ -89,26 +131,30 @@ final class ConnectionStore: ObservableObject {
 
     private func persist(
         _ updatedProfiles: [ConnectionProfile],
-        keychainUpdate: ConnectionKeychainUpdate,
-        account: String
+        keychainUpdates: [ConnectionKeychainMutation]
     ) -> Bool {
-        let previousSecret: String?
-        if keychainUpdate.changesKeychain {
-            do {
-                previousSecret = try keychain.readSecret(account: account)
-                try apply(keychainUpdate, account: account)
-            } catch {
-                NSLog("Terminull failed to update Keychain for connection: \(error.localizedDescription)")
-                return false
+        let mutations = keychainUpdates.filter(\.update.changesKeychain)
+        var previousSecrets: [ConnectionKeychainSnapshot] = []
+        var appliedSnapshots: [ConnectionKeychainSnapshot] = []
+        do {
+            for mutation in mutations {
+                previousSecrets.append(ConnectionKeychainSnapshot(
+                    account: mutation.account,
+                    secret: try keychain.readSecret(account: mutation.account)
+                ))
             }
-        } else {
-            previousSecret = nil
+            for (mutation, snapshot) in zip(mutations, previousSecrets) {
+                try apply(mutation.update, account: mutation.account)
+                appliedSnapshots.append(snapshot)
+            }
+        } catch {
+            restoreKeychainSecrets(appliedSnapshots)
+            NSLog("Terminull failed to update Keychain for connection: \(error.localizedDescription)")
+            return false
         }
 
         guard save(updatedProfiles) else {
-            if keychainUpdate.changesKeychain {
-                restoreKeychainSecret(previousSecret, account: account)
-            }
+            restoreKeychainSecrets(previousSecrets)
             return false
         }
 
@@ -127,15 +173,17 @@ final class ConnectionStore: ObservableObject {
         }
     }
 
-    private func restoreKeychainSecret(_ secret: String?, account: String) {
-        do {
-            if let secret {
-                try keychain.saveSecret(secret, account: account)
-            } else {
-                try keychain.deleteSecret(account: account)
+    private func restoreKeychainSecrets(_ snapshots: [ConnectionKeychainSnapshot]) {
+        for snapshot in snapshots {
+            do {
+                if let secret = snapshot.secret {
+                    try keychain.saveSecret(secret, account: snapshot.account)
+                } else {
+                    try keychain.deleteSecret(account: snapshot.account)
+                }
+            } catch {
+                NSLog("Terminull failed to restore Keychain state after connection save failure: \(error.localizedDescription)")
             }
-        } catch {
-            NSLog("Terminull failed to restore Keychain state after connection save failure: \(error.localizedDescription)")
         }
     }
 
@@ -148,6 +196,19 @@ final class ConnectionStore: ObservableObject {
         } catch {
             NSLog("Terminull failed to secure connection storage: \(error.localizedDescription)")
         }
+    }
+}
+
+private struct ConnectionKeychainSnapshot {
+    let account: String
+    let secret: String?
+}
+
+private extension JSONDecoder {
+    static var connectionProfiles: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }
 

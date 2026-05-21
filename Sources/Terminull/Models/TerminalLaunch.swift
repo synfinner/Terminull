@@ -22,6 +22,7 @@ struct TerminalLaunch: Equatable {
     }
 
     static func ssh(profile: ConnectionProfile, environment: [String]? = nil) -> TerminalLaunch {
+        let keyPath = profile.identityFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
         var args: [String] = [
             "-tt",
             "-o", "ServerAliveInterval=30",
@@ -30,8 +31,18 @@ struct TerminalLaunch: Equatable {
             "-o", "UseKeychain=no",
             "-p", String(profile.port)
         ]
+        if profile.storesLoginPassword {
+            args.append(contentsOf: [
+                "-o", "NumberOfPasswordPrompts=1",
+                "-o", "PasswordAuthentication=yes",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", keyPath.isEmpty ? "PreferredAuthentications=password" : "PreferredAuthentications=publickey,password"
+            ])
+            if keyPath.isEmpty {
+                args.append(contentsOf: ["-o", "PubkeyAuthentication=no"])
+            }
+        }
 
-        let keyPath = profile.identityFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !keyPath.isEmpty {
             args.append(contentsOf: ["-i", keyPath, "-o", "IdentitiesOnly=yes"])
         }

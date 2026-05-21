@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 
-@main
 struct TerminullApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

@@ -12,11 +12,15 @@ struct ConnectionEditorView: View {
     @State private var name: String
     @State private var host: String
     @State private var username: String
+    @State private var loginPassword: String = ""
+    @State private var removeLoginPassword: Bool = false
     @State private var port: Int
     @State private var keyPath: String
     @State private var rememberPassphrase: Bool
     @State private var keyPassphrase: String = ""
     @State private var validationMessage: String?
+    @State private var showingPassphrasePrompt = false
+    @State private var skippedPassphrasePrompt = false
 
     private var chrome: AppChromePalette {
         preferencesStore.preferences.theme.chrome
@@ -53,6 +57,18 @@ struct ConnectionEditorView: View {
                 ConnectionFieldRow("User") {
                     TextField(NSUserName(), text: $username)
                         .textFieldStyle(.roundedBorder)
+                }
+
+                ConnectionFieldRow("Password") {
+                    SecureField(existingProfile?.storesLoginPassword == true ? "Leave blank to keep saved" : "Optional", text: $loginPassword)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                if existingProfile?.storesLoginPassword == true {
+                    ConnectionFieldRow("") {
+                        Toggle("Remove saved login password", isOn: $removeLoginPassword)
+                            .toggleStyle(.checkbox)
+                    }
                 }
 
                 ConnectionFieldRow("Port") {
@@ -128,6 +144,25 @@ struct ConnectionEditorView: View {
         .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(chrome.primaryText)
         .background(chrome.windowBackground.color)
+        .alert("Save SSH Key Passphrase?", isPresented: $showingPassphrasePrompt) {
+            Button("Save Passphrase") {
+                rememberPassphrase = true
+                skippedPassphrasePrompt = false
+                validationMessage = "Enter the key passphrase to save it to Keychain."
+            }
+
+            Button("Continue Without Saving") {
+                skippedPassphrasePrompt = true
+                save()
+            }
+
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Terminull can store this key's passphrase in the macOS Keychain so the saved SSH connection can load it before connecting.")
+        }
+        .onChange(of: keyPath) { _, _ in
+            skippedPassphrasePrompt = false
+        }
     }
 
     private var header: some View {
@@ -170,14 +205,31 @@ struct ConnectionEditorView: View {
             return
         }
 
+        let trimmedKeyPath = keyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
+            keyPath: trimmedKeyPath,
+            rememberPassphrase: rememberPassphrase,
+            existingStoresKeyPassphrase: existingProfile?.storesKeyPassphrase == true,
+            skippedPrompt: skippedPassphrasePrompt
+        ) {
+            showingPassphrasePrompt = true
+            return
+        }
+
         let id = existingProfile?.id ?? UUID()
-        let hasExistingPassphrase = existingProfile?.storesKeyPassphrase == true && keychain.hasSecret(account: id.uuidString)
+        let hasExistingPassphrase = existingProfile?.storesKeyPassphrase == true
+            && keychain.hasSecret(account: ConnectionSecretAccount.keyPassphrase(for: id))
         let shouldKeepExistingPassphrase = keyPassphrase.isEmpty && hasExistingPassphrase && rememberPassphrase
         if rememberPassphrase && keyPassphrase.isEmpty && !shouldKeepExistingPassphrase {
             validationMessage = "Key passphrase is required when saving to Keychain."
             return
         }
         let shouldStorePassphrase = rememberPassphrase && (!keyPassphrase.isEmpty || shouldKeepExistingPassphrase)
+        let loginPasswordDecision = ConnectionEditorLoginPasswordDecision.resolve(
+            enteredPassword: loginPassword,
+            existingStoresLoginPassword: existingProfile?.storesLoginPassword == true,
+            removeSavedPassword: removeLoginPassword
+        )
 
         let profile = ConnectionProfile(
             id: id,
@@ -185,26 +237,72 @@ struct ConnectionEditorView: View {
             host: trimmedHost,
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
             port: port,
-            identityFilePath: keyPath.trimmingCharacters(in: .whitespacesAndNewlines),
+            identityFilePath: trimmedKeyPath,
             storesKeyPassphrase: shouldStorePassphrase,
+            storesLoginPassword: loginPasswordDecision.storesLoginPassword,
             lastConnectedAt: existingProfile?.lastConnectedAt
         )
 
-        let keychainUpdate: ConnectionKeychainUpdate
+        let keyPassphraseUpdate: ConnectionKeychainUpdate
         if shouldStorePassphrase, !keyPassphrase.isEmpty {
-            keychainUpdate = .saveSecret(keyPassphrase)
+            keyPassphraseUpdate = .saveSecret(keyPassphrase)
         } else if !shouldStorePassphrase, existingProfile?.storesKeyPassphrase == true {
-            keychainUpdate = .deleteSecret
+            keyPassphraseUpdate = .deleteSecret
         } else {
-            keychainUpdate = .unchanged
+            keyPassphraseUpdate = .unchanged
         }
 
-        guard connectionStore.upsert(profile, keychainUpdate: keychainUpdate) else {
+        guard connectionStore.upsert(
+            profile,
+            keychainUpdates: [
+                ConnectionKeychainMutation(
+                    account: ConnectionSecretAccount.keyPassphrase(for: profile.id),
+                    update: keyPassphraseUpdate
+                ),
+                ConnectionKeychainMutation(
+                    account: ConnectionSecretAccount.loginPassword(for: profile.id),
+                    update: loginPasswordDecision.keychainUpdate
+                )
+            ]
+        ) else {
             validationMessage = "Could not save connection."
             return
         }
 
         dismiss()
+    }
+}
+
+enum ConnectionEditorLoginPasswordDecision {
+    static func resolve(
+        enteredPassword: String,
+        existingStoresLoginPassword: Bool,
+        removeSavedPassword: Bool
+    ) -> (storesLoginPassword: Bool, keychainUpdate: ConnectionKeychainUpdate) {
+        if removeSavedPassword {
+            return (false, .deleteSecret)
+        }
+        if !enteredPassword.isEmpty {
+            return (true, .saveSecret(enteredPassword))
+        }
+        if existingStoresLoginPassword {
+            return (true, .unchanged)
+        }
+        return (false, .unchanged)
+    }
+}
+
+enum ConnectionEditorPassphrasePrompt {
+    static func shouldPromptBeforeSaving(
+        keyPath: String,
+        rememberPassphrase: Bool,
+        existingStoresKeyPassphrase: Bool,
+        skippedPrompt: Bool
+    ) -> Bool {
+        !keyPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !rememberPassphrase
+            && !existingStoresKeyPassphrase
+            && !skippedPrompt
     }
 }
 

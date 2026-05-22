@@ -101,12 +101,22 @@ final class TerminalSessionStore: ObservableObject {
     func terminateAllSessions() {
         let sessionsToTerminate = sessions
         for session in sessionsToTerminate {
-            remove(session, terminate: true, opensReplacementIfEmpty: false)
+            remove(
+                session,
+                terminate: true,
+                opensReplacementIfEmpty: false,
+                waitsForProcessExit: true
+            )
         }
         selectedSessionID = nil
     }
 
-    private func remove(_ session: TerminalSession, terminate: Bool, opensReplacementIfEmpty: Bool = true) {
+    private func remove(
+        _ session: TerminalSession,
+        terminate: Bool,
+        opensReplacementIfEmpty: Bool = true,
+        waitsForProcessExit: Bool = false
+    ) {
         guard let index = sessions.firstIndex(where: { $0.id == session.id }) else {
             return
         }
@@ -115,7 +125,7 @@ final class TerminalSessionStore: ObservableObject {
         session.isClosed = true
         deleteAskPassToken(for: session)
         if terminate {
-            terminateSessionProcess(session.terminalView)
+            terminateSessionProcess(session.terminalView, waitsForProcessExit: waitsForProcessExit)
         }
         session.terminalView?.processDelegate = nil
         session.terminalView = nil
@@ -221,7 +231,10 @@ final class TerminalSessionStore: ObservableObject {
         ))
     }
 
-    private func terminateSessionProcess(_ terminalView: LocalProcessTerminalView?) {
+    private func terminateSessionProcess(
+        _ terminalView: LocalProcessTerminalView?,
+        waitsForProcessExit: Bool = false
+    ) {
         guard let terminalView else {
             return
         }
@@ -233,16 +246,46 @@ final class TerminalSessionStore: ObservableObject {
             return
         }
 
+        if waitsForProcessExit {
+            Self.killProcessGroupIfStillRunning(pid: pid, graceSeconds: Self.terminationGraceSeconds)
+            return
+        }
+
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.terminationGraceSeconds) {
-            guard kill(pid, 0) == 0 else {
+            Self.killProcessGroupIfStillRunning(pid: pid, graceSeconds: 0)
+        }
+    }
+
+    private static func killProcessGroupIfStillRunning(pid: pid_t, graceSeconds: TimeInterval) {
+        let deadline = Date().addingTimeInterval(graceSeconds)
+        while Date() < deadline {
+            guard processIsStillRunning(pid: pid) else {
                 return
             }
-
-            kill(-pid, SIGKILL)
-            kill(pid, SIGKILL)
-
-            var status: Int32 = 0
-            _ = waitpid(pid, &status, WNOHANG)
+            Thread.sleep(forTimeInterval: 0.05)
         }
+
+        guard processIsStillRunning(pid: pid) else {
+            return
+        }
+
+        kill(-pid, SIGKILL)
+        kill(pid, SIGKILL)
+
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, WNOHANG)
+    }
+
+    private static func processIsStillRunning(pid: pid_t) -> Bool {
+        var status: Int32 = 0
+        let waitResult = waitpid(pid, &status, WNOHANG)
+        if waitResult == pid {
+            return false
+        }
+        if waitResult == -1, errno == ECHILD {
+            return false
+        }
+
+        return kill(pid, 0) == 0
     }
 }

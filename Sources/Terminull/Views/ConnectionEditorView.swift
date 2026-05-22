@@ -205,11 +205,22 @@ struct ConnectionEditorView: View {
             return
         }
 
+        guard ConnectionEditorPortValidator.isValid(port) else {
+            validationMessage = "Port must be between 1 and 65535."
+            return
+        }
+
         let trimmedKeyPath = keyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existingKeyPath = existingProfile?.identityFilePath.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let existingPassphraseStillApplies = ConnectionEditorPassphraseState.existingPassphraseStillApplies(
+            existingStoresKeyPassphrase: existingProfile?.storesKeyPassphrase == true,
+            existingKeyPath: existingKeyPath,
+            newKeyPath: trimmedKeyPath
+        )
         if ConnectionEditorPassphrasePrompt.shouldPromptBeforeSaving(
             keyPath: trimmedKeyPath,
             rememberPassphrase: rememberPassphrase,
-            existingStoresKeyPassphrase: existingProfile?.storesKeyPassphrase == true,
+            existingStoresKeyPassphrase: existingPassphraseStillApplies,
             skippedPrompt: skippedPassphrasePrompt
         ) {
             showingPassphrasePrompt = true
@@ -217,7 +228,7 @@ struct ConnectionEditorView: View {
         }
 
         let id = existingProfile?.id ?? UUID()
-        let hasExistingPassphrase = existingProfile?.storesKeyPassphrase == true
+        let hasExistingPassphrase = existingPassphraseStillApplies
             && keychain.hasSecret(account: ConnectionSecretAccount.keyPassphrase(for: id))
         let shouldKeepExistingPassphrase = keyPassphrase.isEmpty && hasExistingPassphrase && rememberPassphrase
         if rememberPassphrase && keyPassphrase.isEmpty && !shouldKeepExistingPassphrase {
@@ -303,6 +314,25 @@ enum ConnectionEditorPassphrasePrompt {
             && !rememberPassphrase
             && !existingStoresKeyPassphrase
             && !skippedPrompt
+    }
+}
+
+enum ConnectionEditorPortValidator {
+    static func isValid(_ port: Int) -> Bool {
+        ConnectionProfile.normalizedPort(port) == port
+    }
+}
+
+enum ConnectionEditorPassphraseState {
+    static func existingPassphraseStillApplies(
+        existingStoresKeyPassphrase: Bool,
+        existingKeyPath: String,
+        newKeyPath: String
+    ) -> Bool {
+        existingStoresKeyPassphrase
+            && !existingKeyPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && existingKeyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                == newKeyPath.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

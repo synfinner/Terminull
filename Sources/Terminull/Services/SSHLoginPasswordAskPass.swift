@@ -27,7 +27,6 @@ enum SSHLoginPasswordAskPass {
         executablePath: String
     ) -> [String] {
         [
-            "DISPLAY=terminull",
             "SSH_ASKPASS=\(executablePath)",
             "SSH_ASKPASS_REQUIRE=force",
             "\(modeVariable)=1",

@@ -181,7 +181,7 @@ final class SSHAgentService: SSHAgentManaging {
         self.agent = nil
     }
 
-    private static func run(
+    static func run(
         process: Process,
         timeout: TimeInterval,
         label: String,
@@ -199,11 +199,12 @@ final class SSHAgentService: SSHAgentManaging {
             finished.signal()
         }
 
+        try process.run()
+
         if let standardInput, let inputPipe {
             inputPipe.fileHandleForWriting.write(standardInput)
             try? inputPipe.fileHandleForWriting.close()
         }
-        try process.run()
 
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()

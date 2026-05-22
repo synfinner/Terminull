@@ -32,7 +32,7 @@ final class TerminalLaunchTests: XCTestCase {
     }
 
     func testReleaseMetadataIncludesVersionAboutCopyAndDonationAddresses() {
-        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.3b")
+        XCTAssertEqual(TerminullReleaseMetadata.version, "0.1.4")
         XCTAssertTrue(TerminullReleaseMetadata.aboutText.contains("Terminull was built by synfinner. No tracking, no bs, just a terminal emulator with SSH management."))
         XCTAssertTrue(TerminullReleaseMetadata.donationText.contains("Donations are accepted via Bitcoin and Bitcoin Lightning."))
         XCTAssertEqual(TerminullReleaseMetadata.bitcoinAddress, "bc1qqfrapakl4yceqs99k84j3tznjsa9c59mklvsvm")
@@ -69,6 +69,32 @@ final class TerminalLaunchTests: XCTestCase {
         let profile = try JSONDecoder().decode(ConnectionProfile.self, from: data)
 
         XCTAssertFalse(profile.storesLoginPassword)
+    }
+
+    func testConnectionProfileDecodesLegacyProfileWithoutKeyOrPortFields() throws {
+        let id = UUID()
+        let data = """
+        {
+          "id": "\(id.uuidString)",
+          "name": "Legacy",
+          "host": "example.com",
+          "username": "deploy"
+        }
+        """.data(using: .utf8)!
+
+        let profile = try JSONDecoder().decode(ConnectionProfile.self, from: data)
+
+        XCTAssertEqual(profile.id, id)
+        XCTAssertEqual(profile.port, 22)
+        XCTAssertEqual(profile.identityFilePath, "")
+        XCTAssertFalse(profile.storesKeyPassphrase)
+        XCTAssertFalse(profile.storesLoginPassword)
+    }
+
+    func testConnectionProfileNormalizesInvalidPort() {
+        XCTAssertEqual(ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", port: 0).port, 22)
+        XCTAssertEqual(ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", port: 65536).port, 22)
+        XCTAssertEqual(ConnectionProfile(name: "Prod", host: "example.com", username: "deploy", port: 2222).port, 2222)
     }
 
     func testSSHLaunchUsesSystemOpenSSHWithoutOpenSSHKeychainStorage() {
@@ -253,6 +279,22 @@ final class TerminalLaunchTests: XCTestCase {
         XCTAssertEqual(events, ["keychain-read", "ssh-agent", "ssh-add"])
         XCTAssertEqual(sshAddInput, Data("stored-passphrase\n".utf8))
         XCTAssertNotNil(preparation.terminalEnvironment?.first { $0.hasPrefix("SSH_AUTH_SOCK=") })
+    }
+
+    func testSSHAgentProcessRunnerPassesStandardInputToLaunchedProcess() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/cat")
+
+        let result = try SSHAgentService.run(
+            process: process,
+            timeout: 2,
+            label: "cat",
+            standardInput: Data("hello\n".utf8)
+        )
+
+        XCTAssertEqual(result.terminationStatus, 0)
+        XCTAssertEqual(result.stdout, "hello\n")
+        XCTAssertEqual(result.stderr, "")
     }
 
     func testSSHAgentSocketPathUsesShortRuntimeLocation() {
@@ -565,6 +607,38 @@ final class TerminalLaunchTests: XCTestCase {
         )
     }
 
+    func testConnectionEditorRejectsInvalidPorts() {
+        XCTAssertFalse(ConnectionEditorPortValidator.isValid(0))
+        XCTAssertTrue(ConnectionEditorPortValidator.isValid(1))
+        XCTAssertTrue(ConnectionEditorPortValidator.isValid(22))
+        XCTAssertTrue(ConnectionEditorPortValidator.isValid(65535))
+        XCTAssertFalse(ConnectionEditorPortValidator.isValid(65536))
+    }
+
+    func testConnectionEditorExistingPassphraseOnlyAppliesToSameKeyPath() {
+        XCTAssertTrue(
+            ConnectionEditorPassphraseState.existingPassphraseStillApplies(
+                existingStoresKeyPassphrase: true,
+                existingKeyPath: " /Users/test/.ssh/id_ed25519 ",
+                newKeyPath: "/Users/test/.ssh/id_ed25519"
+            )
+        )
+        XCTAssertFalse(
+            ConnectionEditorPassphraseState.existingPassphraseStillApplies(
+                existingStoresKeyPassphrase: true,
+                existingKeyPath: "/Users/test/.ssh/id_ed25519",
+                newKeyPath: "/Users/test/.ssh/id_rsa"
+            )
+        )
+        XCTAssertFalse(
+            ConnectionEditorPassphraseState.existingPassphraseStillApplies(
+                existingStoresKeyPassphrase: false,
+                existingKeyPath: "/Users/test/.ssh/id_ed25519",
+                newKeyPath: "/Users/test/.ssh/id_ed25519"
+            )
+        )
+    }
+
     func testSSHLoginPasswordAskPassEnvironmentUsesMainExecutableAndOneUseToken() {
         let environment = SSHLoginPasswordAskPass.environment(
             account: "profile-id:login-password",
@@ -575,11 +649,11 @@ final class TerminalLaunchTests: XCTestCase {
 
         XCTAssertTrue(environment.contains("SSH_ASKPASS=/Applications/Terminull.app/Contents/MacOS/Terminull"))
         XCTAssertTrue(environment.contains("SSH_ASKPASS_REQUIRE=force"))
-        XCTAssertTrue(environment.contains("DISPLAY=terminull"))
         XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_MODE=1"))
         XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_ACCOUNT=profile-id:login-password"))
         XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_TOKEN_ACCOUNT=profile-id:login-password-token:session-id"))
         XCTAssertTrue(environment.contains("TERMINULL_ASKPASS_TOKEN=one-use-token"))
+        XCTAssertFalse(environment.contains { $0.hasPrefix("DISPLAY=") })
     }
 
     func testSSHLoginPasswordAskPassCommandPrintsPasswordAndConsumesToken() throws {

@@ -38,7 +38,7 @@ struct ConnectionProfile: Identifiable, Codable, Equatable {
         self.name = name
         self.host = host
         self.username = username
-        self.port = port
+        self.port = Self.normalizedPort(port)
         self.identityFilePath = identityFilePath
         self.storesKeyPassphrase = storesKeyPassphrase
         self.storesLoginPassword = storesLoginPassword
@@ -51,8 +51,8 @@ struct ConnectionProfile: Identifiable, Codable, Equatable {
         name = try container.decode(String.self, forKey: .name)
         host = try container.decode(String.self, forKey: .host)
         username = try container.decode(String.self, forKey: .username)
-        port = try container.decode(Int.self, forKey: .port)
-        identityFilePath = try container.decode(String.self, forKey: .identityFilePath)
+        port = Self.normalizedPort(try container.decodeIfPresent(Int.self, forKey: .port) ?? 22)
+        identityFilePath = try container.decodeIfPresent(String.self, forKey: .identityFilePath) ?? ""
         storesKeyPassphrase = try container.decodeIfPresent(Bool.self, forKey: .storesKeyPassphrase) ?? false
         storesLoginPassword = try container.decodeIfPresent(Bool.self, forKey: .storesLoginPassword) ?? false
         lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
@@ -72,5 +72,9 @@ struct ConnectionProfile: Identifiable, Codable, Equatable {
             return host
         }
         return "\(trimmedUser)@\(host)"
+    }
+
+    static func normalizedPort(_ port: Int) -> Int {
+        (1...65535).contains(port) ? port : 22
     }
 }
